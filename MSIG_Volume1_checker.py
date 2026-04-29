@@ -2,7 +2,14 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 
-# --- MSIG DATA ---
+# ================================
+# CONFIG
+# ================================
+st.set_page_config(page_title="MSIG Vol 1 Checker", layout="wide")
+
+# ================================
+# MSIG REFERENCE DATA
+# ================================
 STP_CLASSES = [
     {"Class": 1, "Min": 150, "Max": 1000},
     {"Class": 2, "Min": 1001, "Max": 5000},
@@ -10,31 +17,132 @@ STP_CLASSES = [
     {"Class": 4, "Min": 20001, "Max": float('inf')}
 ]
 
-CLASS_1_LAND = {150: 283, 200: 360, 500: 664, 1000: 1016}
+CLASS_1_LAND = {
+    150: 283,
+    200: 360,
+    500: 664,
+    1000: 1016
+}
 
+SEWAGE_RATE = 210  # L/p/d (MSIG standard)
 
-# --- PDF EXTRACTION ---
-def extract_pdf_data(file):
+# ================================
+# PDF EXTRACTION ENGINE
+# ================================
+def extract_pdf_data(uploaded_file):
+    """Extract PE, Land Area, and full text from PDF"""
     text = ""
 
-    file_bytes = file.read()  # read ONCE
-    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-        for page in doc:
-            text += page.get_text()
+    try:
+        file_bytes = uploaded_file.read()
 
-    # Better regex
-    pe_match = re.search(r"(Population Equivalent|PE)[^\d]*(\d{2,6})", text, re.I)
-    land_match = re.search(r"(Land Area|Site Area)[^\d]*(\d+[.,]?\d*)", text, re.I)
+        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+            for page in doc:
+                page_text = page.get_text()
+                if page_text:
+                    text += page_text + "\n"
 
-    pe = int(pe_match.group(2)) if pe_match else None
-    land = float(land_match.group(2).replace(',', '')) if land_match else None
+        # --- Improved Regex ---
+        pe_match = re.search(r"(Population Equivalent|PE)[^\d]{0,20}(\d{2,6})", text, re.I)
+        land_match = re.search(r"(Land Area|Site Area)[^\d]{0,20}(\d+[.,]?\d*)", text, re.I)
 
-    return pe, land, text
+        pe = int(pe_match.group(2)) if pe_match else None
+        land = float(land_match.group(2).replace(",", "")) if land_match else None
+
+        return pe, land, text
+
+    except Exception as e:
+        st.error(f"PDF Processing Error: {e}")
+        return None, None, ""
 
 
-# --- UI ---
-st.set_page_config(page_title="MSIG Vol 1 Checker", layout="wide")
+# ================================
+# ENGINE: CLASSIFICATION
+# ================================
+def classify_stp(pe):
+    for c in STP_CLASSES:
+        if c["Min"] <= pe <= c["Max"]:
+            return c["Class"]
+    return "Unknown"
+
+
+# ================================
+# ENGINE: LAND CHECK
+# ================================
+def check_land(pe, land, stp_class):
+    if stp_class != 1:
+        return None, "Manual check required for Class 2–4"
+
+    closest_pe = min(CLASS_1_LAND.keys(), key=lambda x: abs(x - pe))
+    required_land = CLASS_1_LAND[closest_pe]
+
+    if land >= required_land:
+        return True, f"PASS (Required: {required_land} m²)"
+    else:
+        return False, f"FAIL (Required: {required_land} m²)"
+
+
+# ================================
+# ENGINE: DOCUMENT CHECK
+# ================================
+def check_documents(text):
+    checklist = {
+        "WLCC": ["WLCC", "Life Cycle Cost", "Cost Benefit"],
+        "GHG/Carbon": ["GHG", "Carbon", "CO2"],
+        "MCA": ["MCA", "Multi Criteria"]
+    }
+
+    results = {}
+    lower_text = text.lower()
+
+    for item, keywords in checklist.items():
+        results[item] = any(k.lower() in lower_text for k in keywords)
+
+    return results
+
+
+# ================================
+# UI
+# ================================
 st.title("🛡️ MSIG Volume 1 Compliance Checker (Jan 2025)")
+
+uploaded_file = st.file_uploader(
+    "Upload Consultant Proposal (PDF)",
+    type="pdf"
+)
+
+# ================================
+# MAIN PIPELINE
+# ================================
+if uploaded_file:
+
+    with st.spinner("🔍 Analyzing PDF..."):
+        pe_val, land_val, raw_text = extract_pdf_data(uploaded_file)
+
+    col1, col2 = st.columns(2)
+
+    # ============================
+    # LEFT: INPUT DATA
+    # ============================
+    with col1:
+        st.subheader("📋 Extracted Project Data")
+
+        pe = st.number_input(
+            "Population Equivalent (PE)",
+            value=pe_val if pe_val else 150
+        )
+
+        land = st.number_input(
+            "Proposed Land Area (m²)",
+            value=land_val if land_val else 0.0
+        )
+
+        avg_flow = (pe * SEWAGE_RATE) / 1000
+        st.metric("Design Average Daily Flow", f"{avg_flow:.2f} m³/d")
+
+    # ============================
+    # RIGHT: COMPLIANCE
+    # =========================st.title("🛡️ MSIG Volume 1 Compliance Checker (Jan 2025)")
 
 uploaded_file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf")
 
