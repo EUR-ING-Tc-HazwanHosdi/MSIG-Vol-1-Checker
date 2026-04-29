@@ -2,8 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 
-# --- MANDATORY MSIG 2025 DATA ---
-# [span_2](start_span)STP Classification (Table 2-2)[span_2](end_span)
+# --- MSIG DATA ---
 STP_CLASSES = [
     {"Class": 1, "Min": 150, "Max": 1000},
     {"Class": 2, "Min": 1001, "Max": 5000},
@@ -11,30 +10,89 @@ STP_CLASSES = [
     {"Class": 4, "Min": 20001, "Max": float('inf')}
 ]
 
-# [span_3](start_span)Land Requirements (Table 5-1 for Class 1)[span_3](end_span)
 CLASS_1_LAND = {150: 283, 200: 360, 500: 664, 1000: 1016}
 
+
+# --- PDF EXTRACTION ---
 def extract_pdf_data(file):
     text = ""
-    with fitz.open(stream=file.read(), filetype="pdf") as doc:
+
+    file_bytes = file.read()  # read ONCE
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
         for page in doc:
             text += page.get_text()
-    
-    # [span_4](start_span)Extract PE and Land using keywords found in MSIG PDC 1 requirements[span_4](end_span)
-    pe_match = re.search(r"(?:PE|Population Equivalent)[:\s]*(\d+,?\d*)", text, re.I)
-    land_match = re.search(r"(?:Land Area|Site Area)[:\s]*(\d+,?\d*)", text, re.I)
-    
-    extracted_pe = int(pe_match.group(1).replace(',', '')) if pe_match else 150
-    extracted_land = float(land_match.group(1).replace(',', '')) if land_match else 0.0
-    
-    return extracted_pe, extracted_land, text
 
-# --- STREAMLIT UI ---
+    # Better regex
+    pe_match = re.search(r"(Population Equivalent|PE)[^\d]*(\d{2,6})", text, re.I)
+    land_match = re.search(r"(Land Area|Site Area)[^\d]*(\d+[.,]?\d*)", text, re.I)
+
+    pe = int(pe_match.group(2)) if pe_match else None
+    land = float(land_match.group(2).replace(',', '')) if land_match else None
+
+    return pe, land, text
+
+
+# --- UI ---
 st.set_page_config(page_title="MSIG Vol 1 Checker", layout="wide")
 st.title("🛡️ MSIG Volume 1 Compliance Checker (Jan 2025)")
 
-uploaded_file = st.file_uploader("Upload Consultant's PDC 1 Proposal (PDF)", type="pdf")
+uploaded_file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf")
 
+if uploaded_file:
+
+    with st.spinner("Analyzing PDF..."):
+        pe_val, land_val, raw_text = extract_pdf_data(uploaded_file)
+
+    col1, col2 = st.columns(2)
+
+    # --- LEFT PANEL ---
+    with col1:
+        st.subheader("📋 Extracted Project Data")
+
+        pe = st.number_input("Population Equivalent (PE)", value=pe_val if pe_val else 150)
+        land = st.number_input("Proposed Land Area (m²)", value=land_val if land_val else 0.0)
+
+        avg_flow = (pe * 210) / 1000
+        st.metric("Design Average Daily Flow", f"{avg_flow:.2f} m³/d")
+
+    # --- RIGHT PANEL ---
+    with col2:
+        st.subheader("✅ MSIG Compliance Audit")
+
+        # Classification
+        stp_class = next((c["Class"] for c in STP_CLASSES if c["Min"] <= pe <= c["Max"]), "Unknown")
+        st.write(f"**STP Classification:** Class {stp_class}")
+
+        # Land check
+        if stp_class == 1:
+            closest_pe = min(CLASS_1_LAND.keys(), key=lambda x: abs(x - pe))
+            req_land = CLASS_1_LAND[closest_pe]
+
+            if land >= req_land:
+                st.success(f"✅ Land Area PASS (Required: {req_land} m²)")
+            else:
+                st.error(f"❌ Land Area FAIL (Required: {req_land} m²)")
+        else:
+            st.info("Manual land check required for Class 2–4")
+
+        # Mandatory documents
+        st.write("**Mandatory Document Check:**")
+
+        checklist = {
+            "WLCC": ["WLCC", "Life Cycle Cost", "CBA"],
+            "GHG/Carbon": ["GHG", "Carbon", "CO2"],
+            "MCA": ["MCA", "Multi Criteria"]
+        }
+
+        for name, keywords in checklist.items():
+            found = any(k.lower() in raw_text.lower() for k in keywords)
+            if found:
+                st.success(f"{name}: Detected")
+            else:
+                st.error(f"{name}: NOT FOUND")
+
+    with st.expander("📄 View Extracted Text"):
+        st.text(raw_text)
 if uploaded_file:
     # 1. Extraction
     pe_val, land_val, raw_text = extract_pdf_data(uploaded_file)
