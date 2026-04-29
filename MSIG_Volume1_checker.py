@@ -183,4 +183,4 @@ if uploaded_file:
 
     with st.expander("View Extracted Text"):
         st.write(full_text)
-)
+
