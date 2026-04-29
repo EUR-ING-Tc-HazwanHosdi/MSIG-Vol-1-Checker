@@ -2,38 +2,89 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 
-# --- MSIG DATA & LOGIC ---
+# --- CONFIGURATION & MSIG DATA ---
+st.set_page_config(page_title="MSIG Vol 1 Checker", layout="wide")
+
 STP_CLASSES = [
-    {"Class": 1, "Min PE": 150, "Max PE": 1000},
-    {"Class": 2, "Min PE": 1001, "Max PE": 5000},
-    {"Class": 3, "Min PE": 5001, "Max PE": 20000},
-    {"Class": 4, "Min PE": 20001, "Max PE": float('inf')}
+    {"Class": 1, "Min": 150, "Max": 1000},
+    {"Class": 2, "Min": 1001, "Max": 5000},
+    {"Class": 3, "Min": 5001, "Max": 20000},
+    {"Class": 4, "Min": 20001, "Max": float('inf')}
 ]
 
-# [span_1](start_span)Table 5-1: Land Requirements for Class 1 (m2)[span_1](end_span)
+# Land Requirements Table 5-1 (Simplified for Class 1)
 CLASS_1_LAND = {150: 283, 200: 360, 500: 664, 1000: 1016}
 
-def extract_data_from_pdf(file):
-    """Simple extraction logic to find key terms in the consultant's PDF."""
+def extract_data(file):
     text = ""
     with fitz.open(stream=file.read(), filetype="pdf") as doc:
         for page in doc:
             text += page.get_text()
     
-    # Simple RegEx to find numbers near keywords (e.g., "PE: 500")
-    pe_match = re.search(r"(?:PE|Population Equivalent)[:\s]*(\d+,?\d*)", text, re.I)
-    land_match = re.search(r"(?:Land Area|Site Area)[:\s]*(\d+,?\d*)", text, re.I)
+    # Regex to find PE and Land Area
+    pe_pattern = re.search(r"(?:PE|Population Equivalent)[:\s]*(\d+,?\d*)", text, re.I)
+    land_pattern = re.search(r"(?:Land Area|Site Area)[:\s]*(\d+,?\d*)", text, re.I)
     
-    extracted_pe = int(pe_match.group(1).replace(',', '')) if pe_match else None
-    extracted_land = float(land_match.group(1).replace(',', '')) if land_match else None
+    extracted_pe = int(pe_pattern.group(1).replace(',', '')) if pe_pattern else None
+    extracted_land = float(land_pattern.group(1).replace(',', '')) if land_pattern else None
     
     return extracted_pe, extracted_land, text
 
-# --- STREAMLIT UI ---
-st.title("Consultant Proposal PDF Checker")
-st.markdown("Automated validation against **MSIG Vol 1 (2025)** standards.")
+# --- UI INTERFACE ---
+st.title("🛡️ MSIG Vol 1 Proposal Validator")
+st.markdown("Automated compliance check for **Sewerage Planning (PDC 1)** submissions.")
 
 uploaded_file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf")
+
+if uploaded_file:
+    pe_val, land_val, full_text = extract_data(uploaded_file)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📊 Extracted Data")
+        # Ensure values are not None for the number_input
+        pe = st.number_input("Population Equivalent (PE)", value=pe_val if pe_val else 150)
+        land = st.number_input("Proposed Land Area (m²)", value=land_val if land_val else 0.0)
+        
+        # Calculation based on MSIG 210L/p/d standard
+        avg_flow = (pe * 210) / 1000
+        st.metric("Design Average Flow", f"{avg_flow:.2f} m³/d")
+
+    with col2:
+        st.subheader("✅ Compliance Audit")
+        
+        # 1. Class Check
+        stp_class = next((c["Class"] for c in STP_CLASSES if c["Min"] <= pe <= c["Max"]), "N/A")
+        st.write(f"**STP Classification:** Class {stp_class}")
+        
+        # 2. Land Check
+        if stp_class == 1:
+            # Find closest reference land area
+            req_land = min(CLASS_1_LAND.values(), key=lambda x: abs(x - pe)) 
+            if land >= req_land:
+                st.success(f"Land Area: PASS (Min: {req_land}m²)")
+            else:
+                st.error(f"Land Area: FAIL (Min: {req_land}m²)")
+        else:
+            st.info("Manual check required for Class 2-4 Land Requirements.")
+
+        # 3. Mandatory Document Keywords Search
+        st.write("**Required Document Check:**")
+        checklist = {
+            "Whole Life Cycle Cost (WLCC)": ["WLCC", "Life Cycle", "CBA"],
+            "GHG/Carbon Calculation": ["GHG", "Carbon", "CO2"],
+            "Multi-Criteria Analysis": ["MCA", "Multi Criteria"]
+        }
+        
+        for item, keys in checklist.items():
+            if any(k.lower() in full_text.lower() for k in keys):
+                st.write(f"✔️ {item}: Detected")
+            else:
+                st.write(f"❌ {item}: **Missing**")
+
+    with st.expander("Show Raw Extracted Text"):
+        st.text(full_text)
 
 if uploaded_file:
     with st.spinner("Analyzing PDF..."):
