@@ -1,216 +1,250 @@
 import streamlit as st
-import re
 
-# =========================
-# PAGE CONFIG
-# =========================
-st.set_page_config(
-    page_title="MSIG Compliance Engine",
-    page_icon="🛡️",
-    layout="wide"
-)
+# ===============================
+# MSIG ENGINE v8 CONFIG CORE
+# ===============================
 
-# =========================
-# HEADER
-# =========================
-st.title("🛡️ MSIG Compliance Engine (Auto Detection v6)")
-st.caption("Planning • Sewer • Pump Station • STP Compliance Checker")
+st.set_page_config(page_title="MSIG Compliance Engine v8", layout="wide")
 
-# =========================
-# FILE UPLOAD
-# =========================
-uploaded_file = st.file_uploader("Upload Consultant PDF", type=["pdf"])
+# ===============================
+# SCORING ENGINE
+# ===============================
 
-# =========================
-# MOCK PDF TEXT EXTRACTION
-# (Replace with PyMuPDF / pdfminer in production)
-# =========================
-def fake_pdf_extract(file):
-    return """
-    SEWERAGE RETICULATION CALCULATION
-    Population Equivalent PE 1228
-    Flow 257.88 m3/day
-    Pipe Diameter 150 mm
-    Slope 0.02
-    STP Capacity 0
-    Land Area 0 m2
-    """
+def risk_engine(score):
+    if score >= 85:
+        return "LOW", "🟢"
+    elif score >= 70:
+        return "MEDIUM", "🟡"
+    elif score >= 50:
+        return "HIGH", "🟠"
+    else:
+        return "CRITICAL", "🔴"
 
-# =========================
-# AUTO DETECT SUBMISSION TYPE
-# =========================
-def detect_submission(text):
-    text_lower = text.lower()
 
-    score = {
-        "vol1": 0,
-        "vol3": 0,
-        "vol4": 0
-    }
+def clamp_score(score):
+    return max(0, min(100, score))
 
-    # Vol 1 Planning signals
-    if "layout" in text_lower or "planning" in text_lower:
-        score["vol1"] += 2
-    if "population equivalent" in text_lower:
-        score["vol1"] += 1
 
-    # Vol 3 Sewer & Pump signals
-    if "pipe" in text_lower or "slope" in text_lower or "sewer" in text_lower:
-        score["vol3"] += 2
-    if "pump" in text_lower or "manhole" in text_lower:
-        score["vol3"] += 2
+# ===============================
+# VOL 1 - PLANNING CHECKS
+# ===============================
 
-    # Vol 4 STP signals
-    if "stp" in text_lower or "treatment" in text_lower:
-        score["vol4"] += 3
-    if "capacity" in text_lower:
-        score["vol4"] += 1
-
-    best = max(score, key=score.get)
-
-    mapping = {
-        "vol1": "📘 Vol 1 - Planning Submission",
-        "vol3": "📗 Vol 3 - Sewer & Pump Submission",
-        "vol4": "📕 Vol 4 - STP Submission"
-    }
-
-    confidence = round(score[best] / 5, 2)
-
-    if confidence < 0.3:
-        return "Unknown", 0.0
-
-    return mapping[best], confidence
-
-# =========================
-# PARAMETER EXTRACTION (simple regex engine)
-# =========================
-def extract_parameters(text):
-    def find(pattern):
-        match = re.search(pattern, text)
-        return float(match.group(1)) if match else 0
-
-    return {
-        "PE": find(r"PE\s*[:=]?\s*(\d+)"),
-        "Flow": find(r"Flow\s*[:=]?\s*([\d.]+)"),
-        "Pipe": find(r"Pipe Diameter\s*[:=]?\s*(\d+)"),
-        "Slope": find(r"Slope\s*[:=]?\s*([\d.]+)"),
-        "STP": find(r"STP Capacity\s*[:=]?\s*(\d+)"),
-        "Land": find(r"Land Area\s*[:=]?\s*([\d.]+)")
-    }
-
-# =========================
-# ENGINE LOGIC
-# =========================
-def compliance_engine(params, submission_type):
-
+def vol1_check(data):
+    score = 100
     issues = []
     warnings = []
-    score = 100
+    rec = []
 
-    # VOL 1 CHECKS
-    if "Vol 1" in submission_type:
-        if params["PE"] > 500:
-            warnings.append("⚠️ High development density")
-            score -= 10
-        if params["Land"] < 100:
-            warnings.append("⚠️ Small land area may affect planning")
-            score -= 15
+    pe = data["pe"]
+    land = data["land"]
 
-    # VOL 3 CHECKS
-    if "Vol 3" in submission_type:
-        if params["Pipe"] < 150:
-            issues.append("❌ Pipe diameter too small")
-            score -= 25
-        if params["Slope"] < 0.01:
-            warnings.append("⚠️ Low slope may affect flow")
-            score -= 10
+    # RULE 1: PE check
+    if pe > 1000:
+        score -= 25
+        issues.append("High Population Equivalent (>1000)")
 
-    # VOL 4 CHECKS
-    if "Vol 4" in submission_type:
-        if params["STP"] < params["PE"]:
-            issues.append("❌ STP undersized for PE")
-            score -= 30
+    elif pe < 50:
+        warnings.append("Very low PE - verify classification")
 
-    # fallback safety
-    if submission_type == "Unknown":
-        issues.append("❌ Cannot reliably detect submission type")
+    # RULE 2: Land adequacy
+    if land < pe * 0.5:
+        score -= 20
+        issues.append("Insufficient land area for development density")
+
+    # RULE 3: basic planning sanity
+    if land <= 0:
         score = 0
+        issues.append("Missing land area")
 
-    # risk level
-    if score >= 80:
-        risk = "Low"
-    elif score >= 50:
-        risk = "Medium"
-    else:
-        risk = "Critical"
+    return clamp_score(score), issues, warnings, rec
 
-    return risk, score, issues, warnings
 
-# =========================
-# MAIN APP
-# =========================
-if uploaded_file:
+# ===============================
+# VOL 3 - SEWER & PUMP CHECKS
+# ===============================
 
-    raw_text = fake_pdf_extract(uploaded_file)
+def vol3_check(data):
+    score = 100
+    issues = []
+    warnings = []
+    rec = []
 
-    submission_type, confidence = detect_submission(raw_text)
-    params = extract_parameters(raw_text)
+    pe = data["pe"]
+    flow = data["flow"]
+    dia = data["diameter"]
+    slope = data["slope"]
 
-    risk, score, issues, warnings = compliance_engine(params, submission_type)
+    # FLOW consistency
+    if flow <= 0:
+        score -= 40
+        issues.append("Invalid flow calculation")
 
-    st.success(f"Detected: {submission_type} | Confidence: {confidence}")
+    # PIPE DIAMETER CHECK
+    if dia < 150:
+        score -= 25
+        issues.append("Pipe diameter too small (<150mm)")
 
-    # =========================
-    # TABS SYSTEM (CORE FEATURE)
-    # =========================
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Overview",
-        "📘 Vol 1 Planning",
-        "📗 Vol 3 Sewer & Pump",
-        "📕 Vol 4 STP"
-    ])
+    # SLOPE CHECK
+    if slope < 0.005:
+        score -= 20
+        warnings.append("Slope may be too low for self-cleansing velocity")
 
-    with tab1:
-        st.subheader("📊 Compliance Summary")
-        st.metric("Risk Level", risk)
+    # PE vs flow sanity
+    expected_flow = pe * 0.21  # simplified rule
+    if abs(flow - expected_flow) / max(expected_flow, 1) > 0.5:
+        score -= 15
+        warnings.append("Flow vs PE inconsistency detected")
+
+    return clamp_score(score), issues, warnings, rec
+
+
+# ===============================
+# VOL 4 - STP CHECKS
+# ===============================
+
+def vol4_check(data):
+    score = 100
+    issues = []
+    warnings = []
+    rec = []
+
+    pe = data["pe"]
+    stp = data["stp_capacity"]
+
+    if stp <= 0:
+        score -= 50
+        issues.append("Missing STP capacity")
+
+    if stp < pe:
+        score -= 30
+        issues.append("STP undersized for PE demand")
+
+    if stp > pe * 2:
+        warnings.append("STP may be overdesigned")
+
+    return clamp_score(score), issues, warnings, rec
+
+
+# ===============================
+# UI HEADER
+# ===============================
+
+st.title("🛡️ MSIG Compliance Engine v8 (Rule-Based)")
+
+tab1, tab2, tab3 = st.tabs([
+    "📘 Vol 1 Planning",
+    "📗 Vol 3 Sewer & Pump",
+    "📕 Vol 4 STP"
+])
+
+# ===============================
+# VOL 1 UI
+# ===============================
+
+with tab1:
+    st.subheader("Vol 1 - Planning Submission Check")
+
+    pe = st.number_input("Population Equivalent (PE)", 0, 100000, 100)
+    land = st.number_input("Land Area (m²)", 0.0, 100000.0, 500.0)
+
+    if st.button("Run Vol 1 Check"):
+        score, issues, warnings, rec = vol1_check({
+            "pe": pe,
+            "land": land
+        })
+
+        risk, icon = risk_engine(score)
+
         st.metric("Score", f"{score}/100")
+        st.metric("Risk Level", f"{icon} {risk}")
 
-        st.json(params)
+        st.write("### Issues")
+        st.write(issues if issues else "None")
 
-        if issues:
-            st.error("Issues Found")
-            for i in issues:
-                st.write(i)
+        st.write("### Warnings")
+        st.write(warnings if warnings else "None")
 
-        if warnings:
-            st.warning("Warnings")
-            for w in warnings:
-                st.write(w)
+        st.write("### Recommendations")
+        st.write(rec if rec else ["Ensure zoning compliance", "Verify layout efficiency"])
 
-    with tab2:
-        st.subheader("📘 Planning Review")
-        st.write("Population, Land Use, Density Analysis")
 
-        if "Vol 1" in submission_type:
-            st.success("This submission includes Planning Scope")
-        else:
-            st.info("Not detected as Planning submission")
+# ===============================
+# VOL 3 UI
+# ===============================
 
-    with tab3:
-        st.subheader("📗 Sewer & Pump Review")
+with tab2:
+    st.subheader("Vol 3 - Sewer & Pump Station Check")
 
-        if "Vol 3" in submission_type:
-            st.success("Sewerage Reticulation detected")
+    pe = st.number_input("PE", 0, 100000, 200)
+    flow = st.number_input("Flow (m³/day)", 0.0, 100000.0, 50.0)
+    diameter = st.number_input("Pipe Diameter (mm)", 0, 2000, 150)
+    slope = st.number_input("Slope", 0.0, 1.0, 0.01)
 
-        st.write("Pipe sizing, slope, hydraulic flow checks")
+    if st.button("Run Vol 3 Check"):
+        score, issues, warnings, rec = vol3_check({
+            "pe": pe,
+            "flow": flow,
+            "diameter": diameter,
+            "slope": slope
+        })
 
-    with tab4:
-        st.subheader("📕 STP Review")
+        risk, icon = risk_engine(score)
 
-        if "Vol 4" in submission_type:
-            st.success("STP Submission detected")
+        st.metric("Score", f"{score}/100")
+        st.metric("Risk Level", f"{icon} {risk}")
 
-        st.write("Treatment capacity vs PE comparison")
+        st.write("### Issues")
+        st.write(issues if issues else "None")
 
-else:
-    st.info("Upload a consultant PDF to start compliance checking")
+        st.write("### Warnings")
+        st.write(warnings if warnings else "None")
+
+        st.write("### Recommendations")
+        st.write(rec if rec else [
+            "Verify hydraulic gradient",
+            "Check manhole spacing",
+            "Confirm pipe self-cleansing velocity"
+        ])
+
+
+# ===============================
+# VOL 4 UI
+# ===============================
+
+with tab3:
+    st.subheader("Vol 4 - Sewage Treatment Plant (STP) Check")
+
+    pe = st.number_input("PE", 0, 100000, 300)
+    stp = st.number_input("STP Capacity (PE equivalent)", 0, 100000, 0)
+
+    if st.button("Run Vol 4 Check"):
+        score, issues, warnings, rec = vol4_check({
+            "pe": pe,
+            "stp_capacity": stp
+        })
+
+        risk, icon = risk_engine(score)
+
+        st.metric("Score", f"{score}/100")
+        st.metric("Risk Level", f"{icon} {risk}")
+
+        st.write("### Issues")
+        st.write(issues if issues else "None")
+
+        st.write("### Warnings")
+        st.write(warnings if warnings else "None")
+
+        st.write("### Recommendations")
+        st.write(rec if rec else [
+            "Check STP process selection (SBR / Extended Aeration)",
+            "Verify effluent compliance",
+            "Check hydraulic retention time"
+        ])
+
+
+# ===============================
+# FOOTER
+# ===============================
+
+st.markdown("---")
+st.caption("MSIG Engine v8 | Rule-Based Compliance System | Engineering Decision Support Tool")
