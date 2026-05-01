@@ -1,13 +1,13 @@
 import streamlit as st
 import fitz
 import re
-from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="STP Smart Assist Pro", layout="wide")
+st.set_page_config(page_title="MSIG Compliance Checker", layout="wide")
 
 SEWAGE_RATE = 210
 
@@ -30,8 +30,8 @@ CLASS_1_LAND = {
 # =========================
 def extract_pdf(file):
     text = ""
-    file_bytes = file.read()
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    file.seek(0)
+    doc = fitz.open(stream=file.read(), filetype="pdf")
 
     for page in doc:
         t = page.get_text()
@@ -48,7 +48,7 @@ def extract_pdf(file):
 
 
 # =========================
-# LOGIC ENGINE
+# LOGIC ENGINE (VOL 1)
 # =========================
 def get_class(pe):
     for c, mn, mx in STP_CLASSES:
@@ -57,18 +57,18 @@ def get_class(pe):
     return "Unknown"
 
 
-def check_compliance(pe, land):
+def check_compliance(pe, land, flow):
     issues = []
     recommendations = []
+    observations = []
 
     stp_class = get_class(pe)
 
-    # Rule 1: Minimum PE
+    # Rules
     if pe < 150:
         issues.append("PE below minimum requirement (150)")
         recommendations.append("Increase PE to at least 150")
 
-    # Rule 2: Land check (Class 1 only)
     if stp_class == 1:
         ref_pe = min(CLASS_1_LAND.keys(), key=lambda x: abs(x - pe))
         required_land = CLASS_1_LAND[ref_pe]
@@ -79,8 +79,34 @@ def check_compliance(pe, land):
     else:
         issues.append("Land check requires manual review for Class >1")
 
-    # Risk Score
+    # Observations
+    observations.append(f"System classified as Class {stp_class}")
+    observations.append(f"Detected PE: {pe}")
+    observations.append(f"Estimated Flow: {flow:.2f} m³/day")
+
+    if len(issues) == 0:
+        observations.append("No major non-compliance detected based on available data")
+
+    # Assumptions
+    assumptions = [
+        "Flow calculated using 210 L/person/day",
+        "Land requirement based on nearest MSIG reference",
+        "Limited to extracted data from PDF"
+    ]
+
+    # Limitations
+    limitations = [
+        "Automatic extraction may miss tabulated/drawing data",
+        "Manual verification required for full compliance",
+        "Class >1 requires detailed engineering review"
+    ]
+
+    # Risk
     risk_score = min(len(issues) * 30, 100)
+    if len(issues) == 0:
+        risk_score = 10
+
+    confidence = "High" if pe and land else "Medium"
 
     status = "Compliant" if len(issues) == 0 else "Non-Compliant"
 
@@ -89,31 +115,51 @@ def check_compliance(pe, land):
         "class": stp_class,
         "issues": issues,
         "recommendations": recommendations,
-        "risk": risk_score
+        "observations": observations,
+        "assumptions": assumptions,
+        "limitations": limitations,
+        "risk": risk_score,
+        "confidence": confidence
     }
 
 
 # =========================
 # REPORT GENERATOR
 # =========================
-def generate_report(result):
-    file_name = "stp_report.pdf"
+def generate_report(result, pe, land, flow):
+    file_name = "MSIG_Compliance_Report.pdf"
     doc = SimpleDocTemplate(file_name)
     styles = getSampleStyleSheet()
 
     content = []
 
-    content.append(Paragraph(f"Status: {result['status']}", styles["Title"]))
+    content.append(Paragraph("MSIG COMPLIANCE CHECKER", styles["Title"]))
+    content.append(Paragraph("Engineering Compliance Report", styles["Heading2"]))
+    content.append(Spacer(1, 10))
+
+    content.append(Paragraph("Project Data", styles["Heading3"]))
+    content.append(Paragraph(f"PE: {pe}", styles["Normal"]))
+    content.append(Paragraph(f"Land Area: {land} m²", styles["Normal"]))
+    content.append(Paragraph(f"Flow: {flow:.2f} m³/day", styles["Normal"]))
+    content.append(Spacer(1, 10))
+
+    content.append(Paragraph("Compliance Summary", styles["Heading3"]))
+    content.append(Paragraph(f"Status: {result['status']}", styles["Normal"]))
     content.append(Paragraph(f"Class: {result['class']}", styles["Normal"]))
     content.append(Paragraph(f"Risk Score: {result['risk']}%", styles["Normal"]))
+    content.append(Paragraph(f"Confidence: {result['confidence']}", styles["Normal"]))
+    content.append(Spacer(1, 10))
 
-    content.append(Paragraph("Issues:", styles["Heading2"]))
-    for i in result["issues"]:
-        content.append(Paragraph(f"- {i}", styles["Normal"]))
+    sections = ["observations", "issues", "recommendations", "assumptions", "limitations"]
 
-    content.append(Paragraph("Recommendations:", styles["Heading2"]))
-    for r in result["recommendations"]:
-        content.append(Paragraph(f"- {r}", styles["Normal"]))
+    for sec in sections:
+        content.append(Paragraph(sec.capitalize(), styles["Heading3"]))
+        items = result.get(sec, [])
+        if items:
+            for i in items:
+                content.append(Paragraph(f"- {i}", styles["Normal"]))
+        else:
+            content.append(Paragraph("None", styles["Normal"]))
 
     doc.build(content)
     return file_name
@@ -122,55 +168,40 @@ def generate_report(result):
 # =========================
 # UI
 # =========================
-st.title("🛡️ STP Smart Assist Pro")
+st.title("🛡️ MSIG Compliance Checker")
 
-file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf", key="upload")
+tab1, tab2, tab3 = st.tabs([
+    "Vol 1: STP",
+    "Vol 3: Sewer Line",
+    "Vol 4: Pump Station"
+])
 
-if file:
-    pe, land, text = extract_pdf(file)
+# =========================
+# TAB 1 (STP)
+# =========================
+with tab1:
+    file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf", key="upload")
 
-    pe = pe or 150
-    land = land or 0.0
+    if file:
+        pe, land, text = extract_pdf(file)
 
-    col1, col2 = st.columns(2)
-
-    # LEFT SIDE
-    with col1:
-        st.subheader("📋 Extracted Data")
-
-        pe = st.number_input("Population Equivalent (PE)", value=pe, key="pe_input")
-        land = st.number_input("Land Area (m²)", value=land, key="land_input")
+        pe = pe or 150
+        land = land or 0.0
 
         flow = (pe * SEWAGE_RATE) / 1000
-        st.metric("Flow (m³/d)", f"{flow:.2f}")
 
-    # RIGHT SIDE
-    with col2:
-        st.subheader("✅ Compliance Result")
+        col1, col2 = st.columns(2)
 
-        if st.button("Run Compliance Check"):
-            result = check_compliance(pe, land)
+        with col1:
+            st.subheader("Extracted Data")
+            pe = st.number_input("PE", value=pe, key="pe_input")
+            land = st.number_input("Land Area", value=land, key="land_input")
+            st.metric("Flow (m³/d)", f"{flow:.2f}")
 
-            st.write(f"**Status:** {result['status']}")
-            st.write(f"**Class:** {result['class']}")
-            st.metric("Risk Score", f"{result['risk']}%")
+        with col2:
+            if st.button("Run Compliance Check"):
+                result = check_compliance(pe, land, flow)
 
-            st.subheader("Issues")
-            for i in result["issues"]:
-                st.write(f"- {i}")
-
-            st.subheader("Recommendations")
-            for r in result["recommendations"]:
-                st.write(f"- {r}")
-
-            report_file = generate_report(result)
-
-            with open(report_file, "rb") as f:
-                st.download_button(
-                    "📥 Download Compliance Report",
-                    f,
-                    file_name="STP_Compliance_Report.pdf"
-                )
-
-    with st.expander("Raw Extracted Text"):
-        st.text(text)
+                st.subheader("Result")
+                st.write(result["status"])
+                st
