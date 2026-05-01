@@ -1,66 +1,83 @@
 import streamlit as st
 import fitz
 import re
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
 
 # =========================
-# PAGE CONFIG
+# CONFIG
 # =========================
 st.set_page_config(page_title="MSIG Compliance Engine", layout="wide")
 
+SEWAGE_RATE = 210
+
 
 # =========================
-# PDF EXTRACTOR (SAFE)
+# PDF TEXT EXTRACTION
 # =========================
 def extract_pdf(file):
+    text = ""
+
     try:
-        text = ""
-        file_bytes = file.getvalue()
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-
+        doc = fitz.open(stream=file.getvalue(), filetype="pdf")
         for page in doc:
-            text += page.get_text()
-
-        pe = re.search(r"PE\s*[:\-]?\s*(\d{2,6})", text)
-        land = re.search(r"(Land Area|Site Area)[^\d]*(\d+\.?\d*)", text)
-
-        return (
-            int(pe.group(1)) if pe else 150,
-            float(land.group(2)) if land else 0.0,
-            text
-        )
-
-    except Exception:
+            text += page.get_text() + "\n"
+    except:
         return 150, 0.0, ""
+
+    pe = re.search(r"(PE|Population Equivalent)[^\d]*(\d{2,6})", text, re.I)
+    land = re.search(r"(Land Area|Site Area)[^\d]*(\d+\.?\d*)", text, re.I)
+
+    pe_val = int(pe.group(2)) if pe else 150
+    land_val = float(land.group(2)) if land else 300
+
+    return pe_val, land_val, text
 
 
 # =========================
-# AUTO DETECT SUBMISSION TYPE
+# STRONG SUBMISSION DETECTOR
 # =========================
 def detect_submission_type(text):
     text = text.lower()
 
-    vol1 = ["population equivalent", "site area", "land area", "planning", "development"]
-    vol3 = ["sewer", "pipe", "manhole", "invert", "pump", "hydraulic", "gradient", "flow"]
-    vol4 = ["stp", "treatment", "aeration", "effluent", "bod", "sludge", "wwtp"]
+    def score(keywords):
+        return sum(text.count(k) for k in keywords)
 
-    score1 = sum(2 for k in vol1 if k in text)
-    score3 = sum(2 for k in vol3 if k in text)
-    score4 = sum(2 for k in vol4 if k in text)
+    vol1 = [
+        "population equivalent", "pe", "site area",
+        "land area", "development", "planning", "proposal"
+    ]
+
+    vol3 = [
+        "sewer", "pipe", "manhole", "invert level",
+        "hydraulic", "gradient", "pump", "flow velocity"
+    ]
+
+    vol4 = [
+        "stp", "treatment", "aeration",
+        "effluent", "bod", "sludge", "wwtp"
+    ]
 
     scores = {
-        "Vol 1 - Planning Submission": score1,
-        "Vol 3 - Sewer & Pump Submission": score3,
-        "Vol 4 - STP Submission": score4
+        "Vol 1 - Planning Submission": score(vol1),
+        "Vol 3 - Sewer & Pump Submission": score(vol3),
+        "Vol 4 - STP Submission": score(vol4)
     }
 
     best = max(scores, key=scores.get)
+    best_score = scores[best]
 
-    if scores[best] == 0:
-        return "Unknown"
+    # confidence system (IMPORTANT FIX)
+    total_hits = sum(scores.values())
 
-    return best
+    if total_hits == 0:
+        return "Unknown", 0
+
+    confidence = best_score / total_hits
+
+    # stricter decision logic
+    if best_score >= 2 and confidence >= 0.5:
+        return best, confidence
+
+    return "Unknown", confidence
 
 
 # =========================
@@ -84,7 +101,15 @@ class Engine:
     def recommend(self, msg):
         self.recommendations.append(msg)
 
-    def finalize(self):
+    def finalize(self, confidence=1.0):
+
+        # 🔥 confidence penalty (IMPORTANT FIX)
+        if confidence < 0.6:
+            self.score -= 20
+            self.warnings.append("Low detection confidence - review required")
+
+        # safety cap (prevents fake 100 scores)
+        self.score = min(self.score, 95)
         self.score = max(0, self.score)
 
         if self.score >= 80:
@@ -106,139 +131,105 @@ class Engine:
 # =========================
 # VOL 1 ENGINE
 # =========================
-def run_vol1(engine, pe, land):
+def run_vol1(e, pe, land):
     density = pe / land if land > 0 else 0
 
     if pe < 150:
-        engine.issue("PE below MSIG minimum (150)")
+        e.issue("PE below MSIG minimum (150)")
+
+    if land < 250:
+        e.warn("Small land area for development")
 
     if density > 1:
-        engine.warn("High development density")
+        e.warn("High development density")
 
-    if land < 300:
-        engine.warn("Small land area for planning")
+    e.recommend("Verify planning compliance with authority zoning")
 
-    engine.recommend("Check zoning & authority requirements")
-
-    return engine
+    return e
 
 
 # =========================
 # VOL 3 ENGINE
 # =========================
-def run_vol3(engine, pipe, slope, flow):
+def run_vol3(e, pipe, slope, flow):
 
     if pipe < 150:
-        engine.issue("Pipe diameter below standard (150mm)")
+        e.issue("Pipe diameter below standard (150mm)")
 
     if slope < 0.005:
-        engine.issue("Slope too low → blockage risk")
+        e.issue("Slope too low (blockage risk)")
 
     if slope > 0.05:
-        engine.issue("Slope unrealistic (>5%)")
+        e.issue("Slope too steep (design unrealistic)")
 
     if flow <= 0:
-        engine.issue("Invalid flow input")
+        e.issue("Invalid flow input")
 
-    engine.recommend("Check hydraulic gradient & pump sizing")
+    e.recommend("Check hydraulic gradient and manhole spacing")
 
-    return engine
+    return e
 
 
 # =========================
 # VOL 4 ENGINE
 # =========================
-def run_vol4(engine, pe, capacity):
+def run_vol4(e, pe, capacity):
 
     if capacity <= 0:
-        engine.issue("STP capacity not defined")
+        e.issue("STP capacity not defined")
 
     if capacity < pe:
-        engine.issue("STP undersized for PE")
+        e.issue("STP undersized for PE")
 
     if capacity > pe * 2:
-        engine.warn("Possible overdesign (cost inefficiency)")
+        e.warn("Possible overdesign")
 
-    engine.recommend("Verify treatment process selection")
+    e.recommend("Confirm treatment process (SBR / EA / etc)")
 
-    return engine
+    return e
 
 
 # =========================
-# RUN ENGINE
+# RUN ENGINE SELECTOR
 # =========================
-def run_engine(data, module):
-    engine = Engine()
+def run_engine(module, data, confidence):
+    e = Engine()
 
     if module == "Vol 1 - Planning Submission":
-        engine = run_vol1(engine, data["pe"], data["land"])
+        e = run_vol1(e, data["pe"], data["land"])
 
     elif module == "Vol 3 - Sewer & Pump Submission":
-        engine = run_vol3(engine, data["pipe"], data["slope"], data["flow"])
+        e = run_vol3(e, data["pipe"], data["slope"], data["flow"])
 
     elif module == "Vol 4 - STP Submission":
-        engine = run_vol4(engine, data["pe"], data["capacity"])
+        e = run_vol4(e, data["pe"], data["capacity"])
 
-    return engine.finalize()
-
-
-# =========================
-# PDF REPORT
-# =========================
-def generate_report(result, data, module):
-    file = "MSIG_Report.pdf"
-    doc = SimpleDocTemplate(file)
-    styles = getSampleStyleSheet()
-
-    content = []
-
-    content.append(Paragraph("MSIG COMPLIANCE ENGINE REPORT", styles["Title"]))
-    content.append(Spacer(1, 10))
-
-    content.append(Paragraph(f"Submission Type: {module}", styles["Heading3"]))
-    content.append(Spacer(1, 10))
-
-    for k, v in data.items():
-        content.append(Paragraph(f"{k}: {v}", styles["Normal"]))
-
-    content.append(Spacer(1, 10))
-
-    content.append(Paragraph(f"Risk: {result['risk']}", styles["Heading3"]))
-    content.append(Paragraph(f"Score: {result['score']}", styles["Normal"]))
-
-    def section(title, items):
-        content.append(Spacer(1, 10))
-        content.append(Paragraph(title, styles["Heading3"]))
-        for i in items:
-            content.append(Paragraph(f"- {i}", styles["Normal"]))
-
-    section("Issues", result["issues"] or ["None"])
-    section("Warnings", result["warnings"] or ["None"])
-    section("Recommendations", result["recommendations"] or ["None"])
-
-    doc.build(content)
-    return file
+    return e.finalize(confidence)
 
 
 # =========================
 # UI
 # =========================
-st.title("🛡️ MSIG Compliance Engine (Auto Detect)")
+st.title("🛡️ MSIG Compliance Engine (Auto Detection v4)")
 
 file = st.file_uploader("Upload Consultant PDF", type="pdf")
 
 if file:
 
     pe, land, text = extract_pdf(file)
-    module = detect_submission_type(text)
 
-    st.info(f"Detected Submission Type: {module}")
+    module, confidence = detect_submission_type(text)
 
-    flow = (pe * 210) / 1000
+    st.info(f"Detected: {module}")
+    st.caption(f"Detection confidence: {confidence:.2f}")
 
-    # INPUTS
+    # ❗ if unknown → still allow but warn strongly
+    if module == "Unknown":
+        st.warning("Low detection confidence — manual verification recommended")
+
+    # inputs
     pe = st.number_input("PE", value=pe)
-    land = st.number_input("Land Area", value=land)
+    land = st.number_input("Land Area (m²)", value=land)
 
     pipe = st.number_input("Pipe Diameter", value=150)
     slope = st.number_input("Slope", value=0.01)
@@ -247,17 +238,18 @@ if file:
     data = {
         "pe": pe,
         "land": land,
-        "flow": flow,
+        "flow": (pe * SEWAGE_RATE) / 1000,
         "pipe": pipe,
         "slope": slope,
         "capacity": capacity
     }
 
-    if st.button("Run MSIG Engine"):
+    if st.button("Run Compliance Engine"):
 
-        result = run_engine(data, module)
+        result = run_engine(module, data, confidence)
 
         st.subheader("RESULT")
+
         st.write("Risk:", result["risk"])
         st.write("Score:", result["score"])
 
@@ -266,17 +258,12 @@ if file:
             st.write("❌", i)
 
         st.subheader("Warnings")
-        for i in result["warnings"]:
-            st.write("⚠️", i)
+        for w in result["warnings"]:
+            st.write("⚠️", w)
 
         st.subheader("Recommendations")
-        for i in result["recommendations"]:
-            st.write("✅", i)
-
-        pdf = generate_report(result, data, module)
-
-        with open(pdf, "rb") as f:
-            st.download_button("Download Report", f, file_name="MSIG_Report.pdf")
+        for r in result["recommendations"]:
+            st.write("✅", r)
 
         with st.expander("Raw Extracted Text"):
             st.text(text)
