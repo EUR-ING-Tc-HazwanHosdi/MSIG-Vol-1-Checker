@@ -26,29 +26,35 @@ CLASS_1_LAND = {
 }
 
 # =========================
-# PDF EXTRACTOR
+# SAFE PDF EXTRACTOR
 # =========================
 def extract_pdf(file):
     text = ""
-    file.seek(0)
-    doc = fitz.open(stream=file.read(), filetype="pdf")
 
-    for page in doc:
-        t = page.get_text()
-        if t:
-            text += t + "\n"
+    try:
+        file_bytes = file.getvalue()
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-    pe = re.search(r"(PE|Population Equivalent)[^\d]*(\d{2,6})", text, re.I)
-    land = re.search(r"(Land Area|Site Area)[^\d]*(\d+\.?\d*)", text, re.I)
+        for page in doc:
+            t = page.get_text()
+            if t:
+                text += t + "\n"
 
-    pe_val = int(pe.group(2)) if pe else None
-    land_val = float(land.group(2)) if land else None
+        # safer regex
+        pe_match = re.search(r"PE\s*[:\-]?\s*(\d{2,6})", text, re.I)
+        land_match = re.search(r"(Land Area|Site Area)[^\d]*(\d+\.?\d*)", text, re.I)
 
-    return pe_val, land_val, text
+        pe_val = int(pe_match.group(1)) if pe_match else None
+        land_val = float(land_match.group(2)) if land_match else None
+
+        return pe_val, land_val, text
+
+    except Exception:
+        return None, None, ""
 
 
 # =========================
-# LOGIC ENGINE (VOL 1)
+# CLASS ENGINE
 # =========================
 def get_class(pe):
     for c, mn, mx in STP_CLASSES:
@@ -57,6 +63,9 @@ def get_class(pe):
     return "Unknown"
 
 
+# =========================
+# COMPLIANCE ENGINE (VOL 1)
+# =========================
 def check_compliance(pe, land, flow):
     issues = []
     recommendations = []
@@ -64,47 +73,47 @@ def check_compliance(pe, land, flow):
 
     stp_class = get_class(pe)
 
-    # Rules
+    # RULES
     if pe < 150:
         issues.append("PE below minimum requirement (150)")
-        recommendations.append("Increase PE to at least 150")
+        recommendations.append("Increase design PE to minimum 150")
 
     if stp_class == 1:
         ref_pe = min(CLASS_1_LAND.keys(), key=lambda x: abs(x - pe))
         required_land = CLASS_1_LAND[ref_pe]
 
         if land < required_land:
-            issues.append(f"Land area insufficient (Required: {required_land} m²)")
-            recommendations.append("Increase land area to meet requirement")
+            issues.append(f"Insufficient land area (Min: {required_land} m²)")
+            recommendations.append("Increase site area or revise layout")
     else:
-        issues.append("Land check requires manual review for Class >1")
+        issues.append("Class >1 requires manual engineering verification")
 
-    # Observations
-    observations.append(f"System classified as Class {stp_class}")
-    observations.append(f"Detected PE: {pe}")
+    # OBSERVATIONS
+    observations.append(f"Detected Class: {stp_class}")
+    observations.append(f"Population Equivalent: {pe}")
     observations.append(f"Estimated Flow: {flow:.2f} m³/day")
 
     if len(issues) == 0:
-        observations.append("No major non-compliance detected based on available data")
+        observations.append("No critical non-compliance detected")
 
-    # Assumptions
+    # ASSUMPTIONS
     assumptions = [
-        "Flow calculated using 210 L/person/day",
-        "Land requirement based on nearest MSIG reference",
-        "Limited to extracted data from PDF"
+        "Flow based on 210 L/person/day",
+        "Land check based on nearest Class 1 reference",
+        "Extraction limited to PDF text only"
     ]
 
-    # Limitations
+    # LIMITATIONS
     limitations = [
-        "Automatic extraction may miss tabulated/drawing data",
-        "Manual verification required for full compliance",
-        "Class >1 requires detailed engineering review"
+        "Cannot fully read drawings/tables in PDF",
+        "Requires manual engineering verification",
+        "Only supports simplified MSIG logic"
     ]
 
-    # Risk
-    risk_score = min(len(issues) * 30, 100)
+    # RISK
+    risk = min(len(issues) * 30, 100)
     if len(issues) == 0:
-        risk_score = 10
+        risk = 10
 
     confidence = "High" if pe and land else "Medium"
 
@@ -118,17 +127,17 @@ def check_compliance(pe, land, flow):
         "observations": observations,
         "assumptions": assumptions,
         "limitations": limitations,
-        "risk": risk_score,
+        "risk": risk,
         "confidence": confidence
     }
 
 
 # =========================
-# REPORT GENERATOR
+# PDF REPORT GENERATOR
 # =========================
 def generate_report(result, pe, land, flow):
-    file_name = "MSIG_Compliance_Report.pdf"
-    doc = SimpleDocTemplate(file_name)
+    filename = "MSIG_Compliance_Report.pdf"
+    doc = SimpleDocTemplate(filename)
     styles = getSampleStyleSheet()
 
     content = []
@@ -143,26 +152,26 @@ def generate_report(result, pe, land, flow):
     content.append(Paragraph(f"Flow: {flow:.2f} m³/day", styles["Normal"]))
     content.append(Spacer(1, 10))
 
-    content.append(Paragraph("Compliance Summary", styles["Heading3"]))
+    content.append(Paragraph("Summary", styles["Heading3"]))
     content.append(Paragraph(f"Status: {result['status']}", styles["Normal"]))
     content.append(Paragraph(f"Class: {result['class']}", styles["Normal"]))
     content.append(Paragraph(f"Risk Score: {result['risk']}%", styles["Normal"]))
     content.append(Paragraph(f"Confidence: {result['confidence']}", styles["Normal"]))
     content.append(Spacer(1, 10))
 
-    sections = ["observations", "issues", "recommendations", "assumptions", "limitations"]
+    def add_section(title, items):
+        content.append(Paragraph(title, styles["Heading3"]))
+        for i in items:
+            content.append(Paragraph(f"- {i}", styles["Normal"]))
 
-    for sec in sections:
-        content.append(Paragraph(sec.capitalize(), styles["Heading3"]))
-        items = result.get(sec, [])
-        if items:
-            for i in items:
-                content.append(Paragraph(f"- {i}", styles["Normal"]))
-        else:
-            content.append(Paragraph("None", styles["Normal"]))
+    add_section("Observations", result["observations"])
+    add_section("Issues", result["issues"] or ["None"])
+    add_section("Recommendations", result["recommendations"])
+    add_section("Assumptions", result["assumptions"])
+    add_section("Limitations", result["limitations"])
 
     doc.build(content)
-    return file_name
+    return filename
 
 
 # =========================
@@ -177,10 +186,10 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 # =========================
-# TAB 1 (STP)
+# TAB 1
 # =========================
 with tab1:
-    file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf", key="upload")
+    file = st.file_uploader("Upload Consultant Proposal (PDF)", type="pdf")
 
     if file:
         pe, land, text = extract_pdf(file)
@@ -194,14 +203,73 @@ with tab1:
 
         with col1:
             st.subheader("Extracted Data")
-            pe = st.number_input("PE", value=pe, key="pe_input")
-            land = st.number_input("Land Area", value=land, key="land_input")
-            st.metric("Flow (m³/d)", f"{flow:.2f}")
+            pe = st.number_input("PE", value=pe)
+            land = st.number_input("Land Area (m²)", value=land)
+            st.metric("Flow (m³/day)", f"{flow:.2f}")
 
         with col2:
             if st.button("Run Compliance Check"):
                 result = check_compliance(pe, land, flow)
 
                 st.subheader("Result")
-                st.write(result["status"])
-                st
+                st.write(f"Status: {result['status']}")
+                st.metric("Risk Score", f"{result['risk']}%")
+                st.write(f"Confidence: {result['confidence']}")
+
+                st.subheader("Observations")
+                for i in result["observations"]:
+                    st.write(f"- {i}")
+
+                st.subheader("Issues")
+                for i in result["issues"]:
+                    st.write(f"- {i}")
+
+                st.subheader("Recommendations")
+                for i in result["recommendations"]:
+                    st.write(f"- {i}")
+
+                pdf = generate_report(result, pe, land, flow)
+
+                with open(pdf, "rb") as f:
+                    st.download_button("Download Report", f, file_name="MSIG_Report.pdf")
+
+        with st.expander("Raw Extracted Text"):
+            st.text(text)
+
+
+# =========================
+# TAB 2 (SEWER LINE)
+# =========================
+with tab2:
+    st.subheader("Sewer Line Check (Vol 3)")
+
+    pipe = st.number_input("Pipe Diameter (mm)", value=150)
+    slope = st.number_input("Slope", value=0.01)
+
+    issues = []
+
+    if pipe < 150:
+        issues.append("Pipe diameter below minimum requirement (150mm)")
+    if slope < 0.005:
+        issues.append("Slope too low (risk of blockage)")
+
+    if issues:
+        st.error("Issues Found")
+        for i in issues:
+            st.write(f"- {i}")
+    else:
+        st.success("Basic sewer line compliance OK")
+
+
+# =========================
+# TAB 3 (PUMP STATION)
+# =========================
+with tab3:
+    st.subheader("Pump Station Check (Vol 4)")
+
+    redundancy = st.selectbox("Pump Redundancy", ["Yes", "No"])
+
+    if redundancy == "No":
+        st.error("Non-compliant: No standby pump provided")
+    else:
+        st.success("Pump redundancy OK")
