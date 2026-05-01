@@ -229,4 +229,54 @@ file = st.file_uploader("Upload Consultant PDF", type="pdf")
 
 if file:
 
-    pe
+    pe, land, text = extract_pdf(file)
+    module = detect_submission_type(text)
+
+    st.info(f"Detected Submission Type: {module}")
+
+    flow = (pe * 210) / 1000
+
+    # INPUTS
+    pe = st.number_input("PE", value=pe)
+    land = st.number_input("Land Area", value=land)
+
+    pipe = st.number_input("Pipe Diameter", value=150)
+    slope = st.number_input("Slope", value=0.01)
+    capacity = st.number_input("STP Capacity", value=200)
+
+    data = {
+        "pe": pe,
+        "land": land,
+        "flow": flow,
+        "pipe": pipe,
+        "slope": slope,
+        "capacity": capacity
+    }
+
+    if st.button("Run MSIG Engine"):
+
+        result = run_engine(data, module)
+
+        st.subheader("RESULT")
+        st.write("Risk:", result["risk"])
+        st.write("Score:", result["score"])
+
+        st.subheader("Issues")
+        for i in result["issues"]:
+            st.write("❌", i)
+
+        st.subheader("Warnings")
+        for i in result["warnings"]:
+            st.write("⚠️", i)
+
+        st.subheader("Recommendations")
+        for i in result["recommendations"]:
+            st.write("✅", i)
+
+        pdf = generate_report(result, data, module)
+
+        with open(pdf, "rb") as f:
+            st.download_button("Download Report", f, file_name="MSIG_Report.pdf")
+
+        with st.expander("Raw Extracted Text"):
+            st.text(text)
