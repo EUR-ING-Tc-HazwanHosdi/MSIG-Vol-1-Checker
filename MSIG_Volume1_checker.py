@@ -11,47 +11,7 @@ st.set_page_config(page_title="MSIG Compliance Engine", layout="wide")
 
 
 # =========================
-# ENGINE CORE
-# =========================
-class ComplianceEngine:
-    def __init__(self):
-        self.issues = []
-        self.warnings = []
-        self.recommendations = []
-        self.score = 100
-
-    def add_issue(self, msg):
-        self.issues.append(msg)
-        self.score -= 25
-
-    def add_warning(self, msg):
-        self.warnings.append(msg)
-        self.score -= 10
-
-    def add_recommendation(self, msg):
-        self.recommendations.append(msg)
-
-    def finalize(self):
-        self.score = max(0, self.score)
-
-        if self.score >= 80:
-            risk = "Low"
-        elif self.score >= 50:
-            risk = "Medium"
-        else:
-            risk = "High"
-
-        return {
-            "score": self.score,
-            "risk": risk,
-            "issues": self.issues,
-            "warnings": self.warnings,
-            "recommendations": self.recommendations
-        }
-
-
-# =========================
-# PDF PARSER (SAFE)
+# PDF EXTRACTOR (SAFE)
 # =========================
 def extract_pdf(file):
     try:
@@ -76,56 +36,130 @@ def extract_pdf(file):
 
 
 # =========================
-# VOL 1 ENGINE (PLANNING)
+# AUTO DETECT SUBMISSION TYPE
+# =========================
+def detect_submission_type(text):
+    text = text.lower()
+
+    vol1 = ["population equivalent", "site area", "land area", "planning", "development"]
+    vol3 = ["sewer", "pipe", "manhole", "invert", "pump", "hydraulic", "gradient", "flow"]
+    vol4 = ["stp", "treatment", "aeration", "effluent", "bod", "sludge", "wwtp"]
+
+    score1 = sum(2 for k in vol1 if k in text)
+    score3 = sum(2 for k in vol3 if k in text)
+    score4 = sum(2 for k in vol4 if k in text)
+
+    scores = {
+        "Vol 1 - Planning Submission": score1,
+        "Vol 3 - Sewer & Pump Submission": score3,
+        "Vol 4 - STP Submission": score4
+    }
+
+    best = max(scores, key=scores.get)
+
+    if scores[best] == 0:
+        return "Unknown"
+
+    return best
+
+
+# =========================
+# ENGINE CORE
+# =========================
+class Engine:
+    def __init__(self):
+        self.issues = []
+        self.warnings = []
+        self.recommendations = []
+        self.score = 100
+
+    def issue(self, msg):
+        self.issues.append(msg)
+        self.score -= 25
+
+    def warn(self, msg):
+        self.warnings.append(msg)
+        self.score -= 10
+
+    def recommend(self, msg):
+        self.recommendations.append(msg)
+
+    def finalize(self):
+        self.score = max(0, self.score)
+
+        if self.score >= 80:
+            risk = "Low"
+        elif self.score >= 50:
+            risk = "Medium"
+        else:
+            risk = "High"
+
+        return {
+            "score": self.score,
+            "risk": risk,
+            "issues": self.issues,
+            "warnings": self.warnings,
+            "recommendations": self.recommendations
+        }
+
+
+# =========================
+# VOL 1 ENGINE
 # =========================
 def run_vol1(engine, pe, land):
     density = pe / land if land > 0 else 0
 
     if pe < 150:
-        engine.add_issue("PE below MSIG minimum (150)")
+        engine.issue("PE below MSIG minimum (150)")
 
     if density > 1:
-        engine.add_warning("High site density detected")
+        engine.warn("High development density")
 
     if land < 300:
-        engine.add_warning("Small land area may affect layout planning")
+        engine.warn("Small land area for planning")
 
-    engine.add_recommendation("Verify local authority zoning compliance")
+    engine.recommend("Check zoning & authority requirements")
 
     return engine
 
 
 # =========================
-# VOL 3 ENGINE (SEWER + PUMP)
+# VOL 3 ENGINE
 # =========================
 def run_vol3(engine, pipe, slope, flow):
 
     if pipe < 150:
-        engine.add_issue("Pipe diameter below 150mm standard")
+        engine.issue("Pipe diameter below standard (150mm)")
 
     if slope < 0.005:
-        engine.add_issue("Slope too low → risk of sedimentation")
+        engine.issue("Slope too low → blockage risk")
 
-    if flow > 100:
-        engine.add_warning("High flow → check pump capacity")
+    if slope > 0.05:
+        engine.issue("Slope unrealistic (>5%)")
 
-    engine.add_recommendation("Verify hydraulic gradient and manhole spacing")
+    if flow <= 0:
+        engine.issue("Invalid flow input")
+
+    engine.recommend("Check hydraulic gradient & pump sizing")
 
     return engine
 
 
 # =========================
-# VOL 4 ENGINE (STP)
+# VOL 4 ENGINE
 # =========================
 def run_vol4(engine, pe, capacity):
 
+    if capacity <= 0:
+        engine.issue("STP capacity not defined")
+
     if capacity < pe:
-        engine.add_issue("STP undersized for design PE")
+        engine.issue("STP undersized for PE")
 
-    if capacity > pe * 1.5:
-        engine.add_warning("Possible overdesign (cost inefficiency)")
+    if capacity > pe * 2:
+        engine.warn("Possible overdesign (cost inefficiency)")
 
-    engine.add_recommendation("Confirm treatment process selection (SBR / Extended Aeration)")
+    engine.recommend("Verify treatment process selection")
 
     return engine
 
@@ -133,22 +167,27 @@ def run_vol4(engine, pe, capacity):
 # =========================
 # RUN ENGINE
 # =========================
-def run_engine(data):
-    engine = ComplianceEngine()
+def run_engine(data, module):
+    engine = Engine()
 
-    engine = run_vol1(engine, data["pe"], data["land"])
-    engine = run_vol3(engine, data["pipe"], data["slope"], data["flow"])
-    engine = run_vol4(engine, data["pe"], data["capacity"])
+    if module == "Vol 1 - Planning Submission":
+        engine = run_vol1(engine, data["pe"], data["land"])
+
+    elif module == "Vol 3 - Sewer & Pump Submission":
+        engine = run_vol3(engine, data["pipe"], data["slope"], data["flow"])
+
+    elif module == "Vol 4 - STP Submission":
+        engine = run_vol4(engine, data["pe"], data["capacity"])
 
     return engine.finalize()
 
 
 # =========================
-# PDF REPORT GENERATOR
+# PDF REPORT
 # =========================
-def generate_report(result, data):
-    filename = "MSIG_Report.pdf"
-    doc = SimpleDocTemplate(filename)
+def generate_report(result, data, module):
+    file = "MSIG_Report.pdf"
+    doc = SimpleDocTemplate(file)
     styles = getSampleStyleSheet()
 
     content = []
@@ -156,18 +195,19 @@ def generate_report(result, data):
     content.append(Paragraph("MSIG COMPLIANCE ENGINE REPORT", styles["Title"]))
     content.append(Spacer(1, 10))
 
-    content.append(Paragraph("PROJECT DATA", styles["Heading3"]))
-    content.append(Paragraph(f"PE: {data['pe']}", styles["Normal"]))
-    content.append(Paragraph(f"Land Area: {data['land']} m²", styles["Normal"]))
-    content.append(Paragraph(f"Flow: {data['flow']:.2f} m³/day", styles["Normal"]))
+    content.append(Paragraph(f"Submission Type: {module}", styles["Heading3"]))
     content.append(Spacer(1, 10))
 
-    content.append(Paragraph("RESULT", styles["Heading3"]))
-    content.append(Paragraph(f"Risk Level: {result['risk']}", styles["Normal"]))
-    content.append(Paragraph(f"Score: {result['score']}", styles["Normal"]))
+    for k, v in data.items():
+        content.append(Paragraph(f"{k}: {v}", styles["Normal"]))
+
     content.append(Spacer(1, 10))
+
+    content.append(Paragraph(f"Risk: {result['risk']}", styles["Heading3"]))
+    content.append(Paragraph(f"Score: {result['score']}", styles["Normal"]))
 
     def section(title, items):
+        content.append(Spacer(1, 10))
         content.append(Paragraph(title, styles["Heading3"]))
         for i in items:
             content.append(Paragraph(f"- {i}", styles["Normal"]))
@@ -177,91 +217,16 @@ def generate_report(result, data):
     section("Recommendations", result["recommendations"] or ["None"])
 
     doc.build(content)
-    return filename
+    return file
 
 
 # =========================
 # UI
 # =========================
-st.title("🛡️ MSIG Compliance Engine (Professional)")
+st.title("🛡️ MSIG Compliance Engine (Auto Detect)")
 
-tab1, tab2, tab3 = st.tabs([
-    "Vol 1: Planning",
-    "Vol 3: Sewer & Pump",
-    "Vol 4: STP"
-])
+file = st.file_uploader("Upload Consultant PDF", type="pdf")
 
-# =========================
-# TAB 1
-# =========================
-with tab1:
-    file = st.file_uploader("Upload Consultant PDF", type="pdf")
+if file:
 
-    if file:
-        pe, land, text = extract_pdf(file)
-        flow = (pe * 210) / 1000
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            pe = st.number_input("PE", value=pe)
-            land = st.number_input("Land Area (m²)", value=land)
-            st.metric("Flow", f"{flow:.2f} m³/day")
-
-        with col2:
-            pipe = st.number_input("Pipe Diameter (mm)", value=150)
-            slope = st.number_input("Slope", value=0.01)
-            capacity = st.number_input("STP Capacity (PE)", value=200)
-
-            if st.button("Run MSIG Engine"):
-
-                data = {
-                    "pe": pe,
-                    "land": land,
-                    "flow": flow,
-                    "pipe": pipe,
-                    "slope": slope,
-                    "capacity": capacity
-                }
-
-                result = run_engine(data)
-
-                st.subheader("RESULT")
-                st.write("Risk:", result["risk"])
-                st.write("Score:", result["score"])
-
-                st.subheader("Issues")
-                for i in result["issues"]:
-                    st.write("-", i)
-
-                st.subheader("Warnings")
-                for i in result["warnings"]:
-                    st.write("-", i)
-
-                st.subheader("Recommendations")
-                for i in result["recommendations"]:
-                    st.write("-", i)
-
-                pdf = generate_report(result, data)
-
-                with open(pdf, "rb") as f:
-                    st.download_button("Download Report", f, file_name="MSIG_Report.pdf")
-
-        with st.expander("Raw Extracted Text"):
-            st.text(text)
-
-
-# =========================
-# TAB 2 (VIEW ONLY)
-# =========================
-with tab2:
-    st.subheader("Sewer & Pump Overview")
-    st.info("This module is integrated into the engine. Use Vol 1 tab to run full checks.")
-
-
-# =========================
-# TAB 3 (VIEW ONLY)
-# =========================
-with tab3:
-    st.subheader("STP Overview")
-    st.info("STP logic is integrated into engine scoring system.")
+    pe
