@@ -9,261 +9,253 @@ st.set_page_config(page_title="MSIG Compliance Engine", layout="wide")
 
 SEWAGE_RATE = 210
 
-
 # =========================
-# PDF TEXT EXTRACTION
+# PDF EXTRACTION ENGINE
 # =========================
 def extract_pdf(file):
     text = ""
+    file_bytes = file.read()
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-    try:
-        doc = fitz.open(stream=file.getvalue(), filetype="pdf")
-        for page in doc:
-            text += page.get_text() + "\n"
-    except:
-        return 150, 0.0, ""
+    for page in doc:
+        t = page.get_text()
+        if t:
+            text += t + "\n"
 
-    pe = re.search(r"(PE|Population Equivalent)[^\d]*(\d{2,6})", text, re.I)
+    return text
+
+
+def extract_values(text):
+    pe = re.search(r"(PE|Population Equivalent)[^\d]*(\d{1,7})", text, re.I)
     land = re.search(r"(Land Area|Site Area)[^\d]*(\d+\.?\d*)", text, re.I)
+    pipe = re.search(r"(Pipe Diameter)[^\d]*(\d+)", text, re.I)
+    slope = re.search(r"(Slope)[^\d]*(\d+\.?\d*)", text, re.I)
+    stp = re.search(r"(STP|Treatment Plant Capacity)[^\d]*(\d+)", text, re.I)
 
-    pe_val = int(pe.group(2)) if pe else 150
-    land_val = float(land.group(2)) if land else 300
-
-    return pe_val, land_val, text
+    return {
+        "pe": int(pe.group(2)) if pe else None,
+        "land": float(land.group(2)) if land else None,
+        "pipe": int(pipe.group(2)) if pipe else None,
+        "slope": float(slope.group(2)) if slope else None,
+        "stp": float(stp.group(2)) if stp else None,
+    }
 
 
 # =========================
-# STRONG SUBMISSION DETECTOR
+# AUTO DETECTION ENGINE
 # =========================
-def detect_submission_type(text):
-    text = text.lower()
+def detect_submission(text):
+    t = text.lower()
 
-    def score(keywords):
-        return sum(text.count(k) for k in keywords)
+    score_vol1 = 0
+    score_vol3 = 0
+    score_vol4 = 0
 
-    vol1 = [
-        "population equivalent", "pe", "site area",
-        "land area", "development", "planning", "proposal"
-    ]
+    # Vol 1 Planning signals
+    if "population equivalent" in t or "pe" in t:
+        score_vol1 += 2
+    if "land area" in t:
+        score_vol1 += 2
+    if "planning" in t or "development" in t:
+        score_vol1 += 1
 
-    vol3 = [
-        "sewer", "pipe", "manhole", "invert level",
-        "hydraulic", "gradient", "pump", "flow velocity"
-    ]
+    # Vol 3 Sewer signals
+    if "pipe" in t or "manning" in t:
+        score_vol3 += 2
+    if "gradient" in t or "slope" in t:
+        score_vol3 += 2
+    if "manhole" in t or "sewer" in t:
+        score_vol3 += 2
 
-    vol4 = [
-        "stp", "treatment", "aeration",
-        "effluent", "bod", "sludge", "wwtp"
-    ]
+    # Vol 4 STP signals
+    if "treatment plant" in t or "stp" in t:
+        score_vol4 += 3
+    if "aeration" in t or "sbr" in t:
+        score_vol4 += 2
+    if "effluent" in t:
+        score_vol4 += 2
 
     scores = {
-        "Vol 1 - Planning Submission": score(vol1),
-        "Vol 3 - Sewer & Pump Submission": score(vol3),
-        "Vol 4 - STP Submission": score(vol4)
+        "Vol 1 - Planning": score_vol1,
+        "Vol 3 - Sewer & Pump": score_vol3,
+        "Vol 4 - STP": score_vol4
     }
 
     best = max(scores, key=scores.get)
-    best_score = scores[best]
+    confidence = scores[best] / 7  # normalize
 
-    # confidence system (IMPORTANT FIX)
-    total_hits = sum(scores.values())
+    if scores[best] == 0:
+        return "Unknown", 0.0
 
-    if total_hits == 0:
-        return "Unknown", 0
-
-    confidence = best_score / total_hits
-
-    # stricter decision logic
-    if best_score >= 2 and confidence >= 0.5:
-        return best, confidence
-
-    return "Unknown", confidence
+    return best, round(confidence, 2)
 
 
 # =========================
-# ENGINE CORE
+# RISK ENGINE
 # =========================
-class Engine:
-    def __init__(self):
-        self.issues = []
-        self.warnings = []
-        self.recommendations = []
-        self.score = 100
+def risk_engine(values, submission_type):
+    risk = 0
+    issues = []
+    warnings = []
+    recommendations = []
 
-    def issue(self, msg):
-        self.issues.append(msg)
-        self.score -= 25
+    pe = values["pe"] or 0
+    land = values["land"] or 0
+    pipe = values["pipe"] or 0
+    slope = values["slope"] or 0
+    stp = values["stp"] or 0
 
-    def warn(self, msg):
-        self.warnings.append(msg)
-        self.score -= 10
+    # Vol 1 logic
+    if "Vol 1" in submission_type:
+        if land < pe * 0.8:
+            risk += 40
+            issues.append("Insufficient land area for PE")
+        if pe > 500:
+            warnings.append("High development density")
 
-    def recommend(self, msg):
-        self.recommendations.append(msg)
+    # Vol 3 logic
+    if "Vol 3" in submission_type:
+        if pipe < 150:
+            risk += 30
+            issues.append("Pipe diameter too small")
+        if slope < 0.01:
+            warnings.append("Low hydraulic gradient")
 
-    def finalize(self, confidence=1.0):
+    # Vol 4 logic
+    if "Vol 4" in submission_type:
+        if stp < pe:
+            risk += 50
+            issues.append("STP capacity undersized")
+        if stp > pe * 10:
+            warnings.append("Possible overdesign STP capacity")
 
-        # 🔥 confidence penalty (IMPORTANT FIX)
-        if confidence < 0.6:
-            self.score -= 20
-            self.warnings.append("Low detection confidence - review required")
+    # Clamp
+    risk = min(risk, 100)
 
-        # safety cap (prevents fake 100 scores)
-        self.score = min(self.score, 95)
-        self.score = max(0, self.score)
+    if risk < 30:
+        level = "Low"
+    elif risk < 70:
+        level = "Medium"
+    else:
+        level = "High"
 
-        if self.score >= 80:
-            risk = "Low"
-        elif self.score >= 50:
-            risk = "Medium"
-        else:
-            risk = "High"
+    if not issues:
+        issues.append("None detected")
 
-        return {
-            "score": self.score,
-            "risk": risk,
-            "issues": self.issues,
-            "warnings": self.warnings,
-            "recommendations": self.recommendations
-        }
+    if not recommendations:
+        recommendations.append("Verify compliance with MSIG guideline volumes")
 
-
-# =========================
-# VOL 1 ENGINE
-# =========================
-def run_vol1(e, pe, land):
-    density = pe / land if land > 0 else 0
-
-    if pe < 150:
-        e.issue("PE below MSIG minimum (150)")
-
-    if land < 250:
-        e.warn("Small land area for development")
-
-    if density > 1:
-        e.warn("High development density")
-
-    e.recommend("Verify planning compliance with authority zoning")
-
-    return e
-
-
-# =========================
-# VOL 3 ENGINE
-# =========================
-def run_vol3(e, pipe, slope, flow):
-
-    if pipe < 150:
-        e.issue("Pipe diameter below standard (150mm)")
-
-    if slope < 0.005:
-        e.issue("Slope too low (blockage risk)")
-
-    if slope > 0.05:
-        e.issue("Slope too steep (design unrealistic)")
-
-    if flow <= 0:
-        e.issue("Invalid flow input")
-
-    e.recommend("Check hydraulic gradient and manhole spacing")
-
-    return e
-
-
-# =========================
-# VOL 4 ENGINE
-# =========================
-def run_vol4(e, pe, capacity):
-
-    if capacity <= 0:
-        e.issue("STP capacity not defined")
-
-    if capacity < pe:
-        e.issue("STP undersized for PE")
-
-    if capacity > pe * 2:
-        e.warn("Possible overdesign")
-
-    e.recommend("Confirm treatment process (SBR / EA / etc)")
-
-    return e
-
-
-# =========================
-# RUN ENGINE SELECTOR
-# =========================
-def run_engine(module, data, confidence):
-    e = Engine()
-
-    if module == "Vol 1 - Planning Submission":
-        e = run_vol1(e, data["pe"], data["land"])
-
-    elif module == "Vol 3 - Sewer & Pump Submission":
-        e = run_vol3(e, data["pipe"], data["slope"], data["flow"])
-
-    elif module == "Vol 4 - STP Submission":
-        e = run_vol4(e, data["pe"], data["capacity"])
-
-    return e.finalize(confidence)
+    return level, risk, issues, warnings, recommendations
 
 
 # =========================
 # UI
 # =========================
-st.title("🛡️ MSIG Compliance Engine (Auto Detection v4)")
+st.title("🛡️ MSIG Compliance Engine (Auto Detection v5)")
 
 file = st.file_uploader("Upload Consultant PDF", type="pdf")
 
 if file:
 
-    pe, land, text = extract_pdf(file)
+    text = extract_pdf(file)
+    values = extract_values(text)
 
-    module, confidence = detect_submission_type(text)
+    submission_type, confidence = detect_submission(text)
 
-    st.info(f"Detected: {module}")
-    st.caption(f"Detection confidence: {confidence:.2f}")
+    st.success(f"Detected Submission: {submission_type}  | Confidence: {confidence}")
 
-    # ❗ if unknown → still allow but warn strongly
-    if module == "Unknown":
-        st.warning("Low detection confidence — manual verification recommended")
+    pe = values["pe"] or 150
+    land = values["land"] or 0
+    pipe = values["pipe"] or 150
+    slope = values["slope"] or 0.02
+    stp = values["stp"] or 0
 
-    # inputs
-    pe = st.number_input("PE", value=pe)
-    land = st.number_input("Land Area (m²)", value=land)
+    flow = (pe * SEWAGE_RATE) / 1000
 
-    pipe = st.number_input("Pipe Diameter", value=150)
-    slope = st.number_input("Slope", value=0.01)
-    capacity = st.number_input("STP Capacity", value=200)
+    level, risk, issues, warnings, rec = risk_engine(values, submission_type)
 
-    data = {
-        "pe": pe,
-        "land": land,
-        "flow": (pe * SEWAGE_RATE) / 1000,
-        "pipe": pipe,
-        "slope": slope,
-        "capacity": capacity
-    }
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📋 Overview",
+        "Vol 1 Planning",
+        "Vol 3 Sewer & Pump",
+        "Vol 4 STP"
+    ])
 
-    if st.button("Run Compliance Engine"):
+    # =========================
+    # OVERVIEW TAB
+    # =========================
+    with tab1:
+        st.subheader("Extracted Parameters")
 
-        result = run_engine(module, data, confidence)
+        col1, col2 = st.columns(2)
 
-        st.subheader("RESULT")
+        with col1:
+            st.metric("PE", pe)
+            st.metric("Land Area (m²)", land)
+            st.metric("Flow (m³/day)", round(flow, 2))
 
-        st.write("Risk:", result["risk"])
-        st.write("Score:", result["score"])
+        with col2:
+            st.metric("Pipe Diameter", pipe)
+            st.metric("Slope", slope)
+            st.metric("STP Capacity", stp)
 
-        st.subheader("Issues")
-        for i in result["issues"]:
-            st.write("❌", i)
+        st.subheader("Result")
+        st.write(f"Risk Level: **{level}**")
+        st.write(f"Score: **{100 - risk}**")
 
-        st.subheader("Warnings")
-        for w in result["warnings"]:
-            st.write("⚠️", w)
+        st.progress(int(100 - risk))
 
-        st.subheader("Recommendations")
-        for r in result["recommendations"]:
-            st.write("✅", r)
+    # =========================
+    # VOL 1
+    # =========================
+    with tab2:
+        st.subheader("Planning Compliance")
 
-        with st.expander("Raw Extracted Text"):
-            st.text(text)
+        if "Vol 1" in submission_type:
+            st.success("Relevant Submission Type")
+        else:
+            st.warning("Not primary module")
+
+        st.write("Issues:", issues)
+        st.write("Warnings:", warnings)
+        st.write("Recommendations:", rec)
+
+    # =========================
+    # VOL 3
+    # =========================
+    with tab3:
+        st.subheader("Sewer & Pump Compliance")
+
+        if "Vol 3" in submission_type:
+            st.success("Relevant Submission Type")
+
+        st.write("Pipe Diameter:", pipe)
+        st.write("Slope:", slope)
+
+        if pipe < 150:
+            st.error("Pipe too small")
+        else:
+            st.success("Pipe OK")
+
+    # =========================
+    # VOL 4
+    # =========================
+    with tab4:
+        st.subheader("STP Compliance")
+
+        if "Vol 4" in submission_type:
+            st.success("Relevant Submission Type")
+
+        st.write("STP Capacity:", stp)
+        st.write("Required PE:", pe)
+
+        if stp < pe:
+            st.error("STP Undersized")
+        else:
+            st.success("STP OK")
+
+    # =========================
+    # RAW TEXT
+    # =========================
+    with st.expander("Raw Extracted Text"):
+        st.text(text)
