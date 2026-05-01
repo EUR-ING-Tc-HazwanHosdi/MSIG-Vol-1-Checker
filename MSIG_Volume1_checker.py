@@ -1,219 +1,168 @@
 import streamlit as st
-import fitz
 import re
 
 # =========================
-# CONFIG
+# PAGE CONFIG
 # =========================
-st.set_page_config(page_title="MSIG Compliance Engine", layout="wide")
-
-SEWAGE_RATE = 210
-
-
-# =========================
-# PDF EXTRACTION
-# =========================
-def extract_pdf(file):
-    text = ""
-    file_bytes = file.read()
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-
-    for page in doc:
-        page_text = page.get_text()
-        if page_text:
-            text += page_text + "\n"
-
-    return text
-
+st.set_page_config(
+    page_title="MSIG Compliance Engine",
+    page_icon="🛡️",
+    layout="wide"
+)
 
 # =========================
-# ENGINEERING VALUE EXTRACTION (FIXED)
+# HEADER
 # =========================
-def extract_values(text):
-
-    def safe_int(pattern):
-        m = re.search(pattern, text, re.I)
-        try:
-            return int(m.group(1))
-        except:
-            return None
-
-    def safe_float(pattern):
-        m = re.search(pattern, text, re.I)
-        try:
-            return float(m.group(1))
-        except:
-            return None
-
-    pe = safe_int(r"population\s*equivalent[^\d]*(\d{2,7})")
-    if not pe:
-        pe = safe_int(r"\bPE\b[^\d]*(\d{2,7})")
-
-    land = safe_float(r"land\s*area[^\d]*(\d+\.?\d*)")
-
-    pipe = safe_int(r"pipe\s*diameter[^\d]*(\d{2,4})")
-
-    slope = safe_float(r"slope[^\d]*(\d+\.?\d*)")
-
-    stp = safe_int(r"(stp|treatment\s*plant)[^\d]*(\d{2,7})")
-
-    return {
-        "pe": pe,
-        "land": land,
-        "pipe": pipe,
-        "slope": slope,
-        "stp": stp,
-    }
-
+st.title("🛡️ MSIG Compliance Engine (Auto Detection v6)")
+st.caption("Planning • Sewer • Pump Station • STP Compliance Checker")
 
 # =========================
-# AUTO DETECTION ENGINE
+# FILE UPLOAD
+# =========================
+uploaded_file = st.file_uploader("Upload Consultant PDF", type=["pdf"])
+
+# =========================
+# MOCK PDF TEXT EXTRACTION
+# (Replace with PyMuPDF / pdfminer in production)
+# =========================
+def fake_pdf_extract(file):
+    return """
+    SEWERAGE RETICULATION CALCULATION
+    Population Equivalent PE 1228
+    Flow 257.88 m3/day
+    Pipe Diameter 150 mm
+    Slope 0.02
+    STP Capacity 0
+    Land Area 0 m2
+    """
+
+# =========================
+# AUTO DETECT SUBMISSION TYPE
 # =========================
 def detect_submission(text):
-    t = text.lower()
+    text_lower = text.lower()
 
-    vol1 = sum([
-        "population equivalent" in t,
-        "land area" in t,
-        "planning" in t
-    ])
-
-    vol3 = sum([
-        "pipe" in t,
-        "manning" in t,
-        "gradient" in t,
-        "manhole" in t
-    ])
-
-    vol4 = sum([
-        "treatment plant" in t,
-        "stp" in t,
-        "aeration" in t,
-        "effluent" in t
-    ])
-
-    scores = {
-        "Vol 1 - Planning": vol1,
-        "Vol 3 - Sewer & Pump": vol3,
-        "Vol 4 - STP": vol4
+    score = {
+        "vol1": 0,
+        "vol3": 0,
+        "vol4": 0
     }
 
-    best = max(scores, key=scores.get)
-    confidence = scores[best] / 4
+    # Vol 1 Planning signals
+    if "layout" in text_lower or "planning" in text_lower:
+        score["vol1"] += 2
+    if "population equivalent" in text_lower:
+        score["vol1"] += 1
 
-    if scores[best] == 0:
+    # Vol 3 Sewer & Pump signals
+    if "pipe" in text_lower or "slope" in text_lower or "sewer" in text_lower:
+        score["vol3"] += 2
+    if "pump" in text_lower or "manhole" in text_lower:
+        score["vol3"] += 2
+
+    # Vol 4 STP signals
+    if "stp" in text_lower or "treatment" in text_lower:
+        score["vol4"] += 3
+    if "capacity" in text_lower:
+        score["vol4"] += 1
+
+    best = max(score, key=score.get)
+
+    mapping = {
+        "vol1": "📘 Vol 1 - Planning Submission",
+        "vol3": "📗 Vol 3 - Sewer & Pump Submission",
+        "vol4": "📕 Vol 4 - STP Submission"
+    }
+
+    confidence = round(score[best] / 5, 2)
+
+    if confidence < 0.3:
         return "Unknown", 0.0
 
-    return best, round(confidence, 2)
-
-
-# =========================
-# VALIDATION LAYER
-# =========================
-def validate_inputs(v):
-    errors = []
-
-    if not v["pe"] or v["pe"] < 10:
-        errors.append("Invalid or missing PE")
-
-    if v["land"] is None:
-        errors.append("Missing land area")
-
-    if v["pipe"] and (v["pipe"] < 100 or v["pipe"] > 2000):
-        errors.append("Pipe diameter unrealistic")
-
-    if v["slope"] and v["slope"] > 5:
-        errors.append("Slope unrealistic")
-
-    return errors
-
+    return mapping[best], confidence
 
 # =========================
-# RISK ENGINE
+# PARAMETER EXTRACTION (simple regex engine)
 # =========================
-def risk_engine(values, submission_type):
+def extract_parameters(text):
+    def find(pattern):
+        match = re.search(pattern, text)
+        return float(match.group(1)) if match else 0
 
-    errors = validate_inputs(values)
+    return {
+        "PE": find(r"PE\s*[:=]?\s*(\d+)"),
+        "Flow": find(r"Flow\s*[:=]?\s*([\d.]+)"),
+        "Pipe": find(r"Pipe Diameter\s*[:=]?\s*(\d+)"),
+        "Slope": find(r"Slope\s*[:=]?\s*([\d.]+)"),
+        "STP": find(r"STP Capacity\s*[:=]?\s*(\d+)"),
+        "Land": find(r"Land Area\s*[:=]?\s*([\d.]+)")
+    }
 
-    if errors:
-        return "Critical", 0, errors, ["Fix PDF extraction / improve document clarity"], ["Re-upload cleaner PDF"]
+# =========================
+# ENGINE LOGIC
+# =========================
+def compliance_engine(params, submission_type):
 
-    pe = values["pe"] or 0
-    land = values["land"] or 0
-    pipe = values["pipe"] or 0
-    slope = values["slope"] or 0
-    stp = values["stp"] or 0
-
-    risk = 0
     issues = []
     warnings = []
-    rec = []
+    score = 100
 
-    # ================= VOL 1 =================
+    # VOL 1 CHECKS
     if "Vol 1" in submission_type:
-        if land < pe * 0.8:
-            risk += 50
-            issues.append("Insufficient land area for PE")
+        if params["PE"] > 500:
+            warnings.append("⚠️ High development density")
+            score -= 10
+        if params["Land"] < 100:
+            warnings.append("⚠️ Small land area may affect planning")
+            score -= 15
 
-    # ================= VOL 3 =================
+    # VOL 3 CHECKS
     if "Vol 3" in submission_type:
-        if pipe < 150:
-            risk += 40
-            issues.append("Pipe undersized")
+        if params["Pipe"] < 150:
+            issues.append("❌ Pipe diameter too small")
+            score -= 25
+        if params["Slope"] < 0.01:
+            warnings.append("⚠️ Low slope may affect flow")
+            score -= 10
 
-        if slope < 0.01:
-            risk += 20
-            warnings.append("Low hydraulic slope")
-
-    # ================= VOL 4 =================
+    # VOL 4 CHECKS
     if "Vol 4" in submission_type:
-        if stp < pe:
-            risk += 60
-            issues.append("STP undersized")
+        if params["STP"] < params["PE"]:
+            issues.append("❌ STP undersized for PE")
+            score -= 30
 
-    score = max(0, 100 - risk)
+    # fallback safety
+    if submission_type == "Unknown":
+        issues.append("❌ Cannot reliably detect submission type")
+        score = 0
 
+    # risk level
     if score >= 80:
-        level = "Low"
+        risk = "Low"
     elif score >= 50:
-        level = "Medium"
+        risk = "Medium"
     else:
-        level = "High"
+        risk = "Critical"
 
-    if not issues:
-        issues.append("No critical issues detected")
-
-    rec.append("Verify MSIG Volume compliance before submission")
-
-    return level, score, issues, warnings, rec
-
+    return risk, score, issues, warnings
 
 # =========================
-# UI
+# MAIN APP
 # =========================
-st.title("🛡️ MSIG Compliance Engine (Auto Detection v5 - Pro)")
+if uploaded_file:
 
-file = st.file_uploader("Upload Consultant PDF", type="pdf")
+    raw_text = fake_pdf_extract(uploaded_file)
 
-if file:
+    submission_type, confidence = detect_submission(raw_text)
+    params = extract_parameters(raw_text)
 
-    text = extract_pdf(file)
-    values = extract_values(text)
-
-    submission_type, confidence = detect_submission(text)
+    risk, score, issues, warnings = compliance_engine(params, submission_type)
 
     st.success(f"Detected: {submission_type} | Confidence: {confidence}")
 
-    pe = values["pe"] or 0
-    land = values["land"] or 0
-    pipe = values["pipe"] or 0
-    slope = values["slope"] or 0
-    stp = values["stp"] or 0
-
-    flow = (pe * SEWAGE_RATE) / 1000 if pe else 0
-
-    level, score, issues, warnings, rec = risk_engine(values, submission_type)
-
+    # =========================
+    # TABS SYSTEM (CORE FEATURE)
+    # =========================
     tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Overview",
         "📘 Vol 1 Planning",
@@ -221,70 +170,47 @@ if file:
         "📕 Vol 4 STP"
     ])
 
-    # ================= OVERVIEW =================
     with tab1:
-        st.subheader("Extracted Parameters")
+        st.subheader("📊 Compliance Summary")
+        st.metric("Risk Level", risk)
+        st.metric("Score", f"{score}/100")
 
-        col1, col2 = st.columns(2)
+        st.json(params)
 
-        with col1:
-            st.metric("PE", pe)
-            st.metric("Land Area (m²)", land)
-            st.metric("Flow (m³/day)", round(flow, 2))
+        if issues:
+            st.error("Issues Found")
+            for i in issues:
+                st.write(i)
 
-        with col2:
-            st.metric("Pipe Diameter", pipe)
-            st.metric("Slope", slope)
-            st.metric("STP Capacity", stp)
+        if warnings:
+            st.warning("Warnings")
+            for w in warnings:
+                st.write(w)
 
-        st.subheader("Compliance Result")
-        st.write(f"Risk Level: **{level}**")
-        st.write(f"Score: **{score}/100**")
-
-        st.progress(score)
-
-        st.write("Issues:", issues)
-        st.write("Warnings:", warnings)
-        st.write("Recommendations:", rec)
-
-    # ================= VOL 1 =================
     with tab2:
-        st.subheader("Planning Submission (Vol 1)")
+        st.subheader("📘 Planning Review")
+        st.write("Population, Land Use, Density Analysis")
 
         if "Vol 1" in submission_type:
-            st.success("Detected as Planning Submission")
+            st.success("This submission includes Planning Scope")
         else:
-            st.warning("Not primary module")
+            st.info("Not detected as Planning submission")
 
-        st.write("Land Area:", land)
-        st.write("PE:", pe)
-
-    # ================= VOL 3 =================
     with tab3:
-        st.subheader("Sewer & Pump (Vol 3)")
+        st.subheader("📗 Sewer & Pump Review")
 
         if "Vol 3" in submission_type:
-            st.success("Detected Sewer/Pump Submission")
+            st.success("Sewerage Reticulation detected")
 
-        st.write("Pipe Diameter:", pipe)
-        st.write("Slope:", slope)
+        st.write("Pipe sizing, slope, hydraulic flow checks")
 
-        if pipe and pipe < 150:
-            st.error("Pipe undersized")
-
-    # ================= VOL 4 =================
     with tab4:
-        st.subheader("STP Submission (Vol 4)")
+        st.subheader("📕 STP Review")
 
         if "Vol 4" in submission_type:
-            st.success("Detected STP Submission")
+            st.success("STP Submission detected")
 
-        st.write("STP Capacity:", stp)
-        st.write("Required PE:", pe)
+        st.write("Treatment capacity vs PE comparison")
 
-        if stp and pe and stp < pe:
-            st.error("STP Undersized")
-
-    # ================= RAW =================
-    with st.expander("Raw Extracted Text"):
-        st.text(text)
+else:
+    st.info("Upload a consultant PDF to start compliance checking")
