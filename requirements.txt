@@ -1,3 +1,5 @@
 streamlit
-pymupdf
-reportlab
+pandas
+openai
+pdfplumber
+openpyxl
